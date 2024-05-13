@@ -1,16 +1,18 @@
 import React, { useState, useEffect } from "react";
 import { Chessboard } from "react-chessboard";
 import axios from "axios";
+import { Chess } from "chess.js";
 
 function App() {
 	const [username, setUsername] = useState("");
 	const [games, setGames] = useState([]);
+	const [selectedGame, setSelectedGame] = useState(null);
 	const [isLoading, setIsLoading] = useState(false);
 	const [error, setError] = useState("");
+	const [chessGame, setChessGame] = useState(new Chess());
 	const [stockfish, setStockfish] = useState(null);
 
 	useEffect(() => {
-		console.log("Setting up Stockfish worker...");
 		const newStockfish = new Worker("stockfish.js");
 		newStockfish.onmessage = function (event) {
 			console.log("From Stockfish: ", event.data);
@@ -18,43 +20,64 @@ function App() {
 		setStockfish(newStockfish);
 
 		return () => {
-			console.log("Terminating Stockfish worker...");
 			newStockfish.terminate();
 		};
 	}, []);
 
 	useEffect(() => {
-		if (games.length > 0 && stockfish) {
-			console.log("Games are available for analysis.");
-			const gamePGN = games[0].pgn;
-			if (gamePGN) {
-				analyzeGameWithStockfish(formatMoves(gamePGN));
-			}
-		} else {
-			console.log("No games available or Stockfish is not ready.");
+		if (selectedGame && stockfish) {
+			console.log("Selected game is available for analysis.");
+			const moves = formatMoves(selectedGame.pgn);
+			analyzeGameWithStockfish(moves);
+			setUpBoardWithGame(selectedGame.pgn);
 		}
-	}, [games, stockfish]);
-
-	const formatMoves = pgn => {
-		// Extract only the moves from the full PGN, removing headers
-		const moves = pgn.split("\n\n")[1].replace(/\d+\./g, "").trim(); // Regex to remove move numbers
-		return moves.replaceAll(" {[%clk 0:04:59.7]}", ""); // Adjust based on actual format if needed
-	};
+	}, [selectedGame, stockfish]);
 
 	const analyzeGameWithStockfish = moves => {
 		console.log("Analyzing game with moves:", moves);
 		if (stockfish) {
-			stockfish.postMessage(`position startpos moves ${moves}`);
-			stockfish.postMessage("go depth 20");
+			stockfish.postMessage({ cmd: "ucinewgame" });
+			stockfish.postMessage({
+				cmd: "position",
+				position: "startpos",
+				moves: moves,
+			});
+			stockfish.postMessage({ cmd: "go", depth: 20 });
 		} else {
 			console.log("Stockfish worker is not initialized");
 		}
 	};
 
+	const formatMoves = pgn => {
+		const movesSection = pgn.split("\n\n")[1];
+		return movesSection
+			.replace(/\{[\s\S]*?\}/g, "")
+			.trim()
+			.replace(/\d+\./g, "")
+			.replace(/\s{2,}/g, " ");
+	};
+
+	const setUpBoardWithGame = pgn => {
+		const chess = new Chess();
+		chess.loadPgn(pgn);
+		setChessGame(chess);
+	};
+
+	const onDrop = (sourceSquare, targetSquare) => {
+		let move = chessGame.move({
+			from: sourceSquare,
+			to: targetSquare,
+			promotion: "q",
+		});
+
+		if (move === null) return false;
+		setChessGame(prev => new Chess(prev.fen()));
+		return true;
+	};
+
 	const fetchGames = async () => {
 		if (!username) {
 			setError("Please enter a username");
-			console.log("No username provided.");
 			return;
 		}
 		setError("");
@@ -62,16 +85,19 @@ function App() {
 		const url = `https://api.chess.com/pub/player/${username}/games/archives`;
 		try {
 			const archivesResponse = await axios.get(url);
-			const monthsUrls = archivesResponse.data.archives;
-			const lastMonthGamesUrl = monthsUrls[monthsUrls.length - 1];
+			const lastMonthGamesUrl = archivesResponse.data.archives.pop();
 			const gamesResponse = await axios.get(lastMonthGamesUrl);
 			setGames(gamesResponse.data.games);
 		} catch (error) {
-			console.error("Error fetching games:", error);
 			setError("Failed to fetch games");
 		} finally {
 			setIsLoading(false);
 		}
+	};
+
+	const handleGameSelect = event => {
+		const game = games.find(g => g.url === event.target.value);
+		setSelectedGame(game);
 	};
 
 	return (
@@ -98,15 +124,21 @@ function App() {
 			{games.length > 0 && (
 				<div>
 					<h2>Games Fetched Successfully!</h2>
-					<ul>
+					<select onChange={handleGameSelect} value={selectedGame?.url || ""}>
 						{games.map((game, index) => (
-							<li key={index}>{game.url}</li>
+							<option key={index} value={game.url}>
+								{game.url}
+							</option>
 						))}
-					</ul>
+					</select>
 				</div>
 			)}
 			<div className='flex items-center justify-center w-full mt-10'>
-				<Chessboard id='BasicBoard' />
+				<Chessboard
+					id='BasicBoard'
+					position={chessGame.fen()}
+					onPieceDrop={onDrop}
+				/>
 			</div>
 		</div>
 	);
